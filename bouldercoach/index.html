@@ -1,0 +1,258 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>BoulderCoach — MVP</title>
+<style>
+  body{font-family:system-ui,Arial,sans-serif;margin:0;padding:16px;background:#0b0b10;color:#e9e9ef}
+  h1,h2{margin:8px 0}
+  .row{display:flex;flex-wrap:wrap;gap:16px}
+  .card{background:#14141d;border:1px solid #2a2a36;border-radius:12px;padding:12px;flex:1;min-width:280px}
+  button, input, select, textarea{background:#1b1b27;color:#e9e9ef;border:1px solid #2a2a36;border-radius:8px;padding:8px}
+  button{cursor:pointer}
+  label{display:block;margin:6px 0}
+  .video-wrap{position:relative;display:inline-block}
+  .overlay{position:absolute;top:0;left:0;pointer-events:auto}
+  .grid-line{stroke:rgba(255,255,255,.35);stroke-width:1}
+  .hp-line{stroke:rgba(80,200,120,.9);stroke-width:2}
+  table{width:100%;border-collapse:collapse;margin-top:8px}
+  th,td{border-bottom:1px solid #2a2a36;padding:6px;text-align:left;font-size:14px}
+  .kpi{display:flex;gap:12px;flex-wrap:wrap}
+  .kpi div{background:#1b1b27;border:1px solid #2a2a36;border-radius:10px;padding:8px 10px;min-width:120px}
+  .pill{display:inline-block;background:#202034;border:1px solid #2a2a36;border-radius:999px;padding:2px 8px;margin-left:6px}
+</style>
+</head>
+<body>
+  <h1>🧗 BoulderCoach — MVP (Playback)</h1>
+
+  <div class="row">
+    <div class="card" style="max-width:520px">
+      <h2>Clip & Controles</h2>
+      <div class="row" style="gap:8px">
+        <button id="btn-audio">Habilitar audio</button>
+        <button id="btn-pre">Cues PRE (voz)</button>
+        <input type="file" id="file" accept="video/mp4,video/webm" />
+      </div>
+      <div class="video-wrap" id="wrap">
+        <video id="video" width="480" height="720" playsinline controls></video>
+        <svg id="svg" class="overlay" width="480" height="720"></svg>
+      </div>
+      <div class="row" style="gap:8px;margin-top:8px">
+        <button id="btn-start">Empezar intento</button>
+        <button id="btn-end">Terminar intento</button>
+        <span>High Point: <strong id="hp-val">0</strong>% <span class="pill">haz clic en la rejilla</span></span>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Registro rápido</h2>
+      <label><input type="checkbox" id="success" /> Éxito (encadenado)</label>
+      <label>RPE: <span id="rpe-val">6</span>
+        <input type="range" id="rpe" min="1" max="10" step="1" value="6" />
+      </label>
+      <label>Notas
+        <textarea id="notes" rows="3" placeholder="rozó la regleta final…"></textarea>
+      </label>
+      <div class="row" style="gap:8px;margin-top:8px">
+        <button id="btn-save">Guardar intento</button>
+        <button id="btn-post">Cues POST (voz)</button>
+      </div>
+
+      <h3 style="margin-top:12px">Resumen de sesión</h3>
+      <div class="kpi">
+        <div>Intentos: <b id="k-attempts">0</b></div>
+        <div>Éxitos: <b id="k-sends">0</b></div>
+        <div>Tasa: <b id="k-rate">0%</b></div>
+        <div>Mejor HP: <b id="k-best">0%</b></div>
+        <div>RPE medio: <b id="k-rpe">0.0</b></div>
+      </div>
+      <div style="margin-top:8px">
+        <button id="btn-export">Exportar CSV</button>
+        <button id="btn-reset">Reset demo</button>
+      </div>
+
+      <table id="tbl">
+        <thead><tr><th>Hora</th><th>Éxito</th><th>HP</th><th>RPE</th><th>Descanso</th></tr></thead>
+        <tbody></tbody>
+      </table>
+      <small>HP = High Point (0–100). Descanso sugerido se calcula tras cada intento.</small>
+    </div>
+  </div>
+
+<script>
+/*** Audio (pitidos) y voz (TTS) ***/
+let actx=null;
+function initAudio(){ try{ actx = new (window.AudioContext||window.webkitAudioContext)(); }catch{} }
+function beep(ms=180, f=880){
+  if(!actx) return;
+  const osc=actx.createOscillator(), g=actx.createGain();
+  osc.connect(g); g.connect(actx.destination);
+  osc.frequency.value=f; g.gain.value=0.15;
+  osc.start(); osc.stop(actx.currentTime+ms/1000);
+}
+function speak(text){
+  const u = new SpeechSynthesisUtterance(text);
+  u.lang = "es-ES"; u.rate = 1; u.pitch = 1;
+  speechSynthesis.cancel(); speechSynthesis.speak(u);
+}
+
+/*** Estado simple ***/
+const video = document.getElementById('video');
+const svg   = document.getElementById('svg');
+const file  = document.getElementById('file');
+const hpVal = document.getElementById('hp-val');
+const rpe   = document.getElementById('rpe');
+const rpeVal= document.getElementById('rpe-val');
+const success= document.getElementById('success');
+const notes = document.getElementById('notes');
+const tblBody = document.querySelector('#tbl tbody');
+
+let highPoint = 0;      // 0..100
+let lastRestSec = 90;   // descanso sugerido último
+const attemptsKey = "bouldercoach_attempts_v1";
+
+function loadAttempts(){
+  try{ return JSON.parse(localStorage.getItem(attemptsKey)||"[]"); }catch{ return []; }
+}
+function saveAttempts(rows){ localStorage.setItem(attemptsKey, JSON.stringify(rows)); }
+function addAttempt(row){
+  const rows = loadAttempts(); rows.push(row); saveAttempts(rows); renderTable(); renderSummary();
+}
+
+/*** Rejilla y click para HP ***/
+function drawGrid(){
+  const W = svg.viewBox.baseVal.width || svg.clientWidth || 480;
+  const H = svg.viewBox.baseVal.height || svg.clientHeight || 720;
+  svg.innerHTML="";
+  for(let i=1;i<5;i++){
+    const y = (H/5)*i;
+    const l = document.createElementNS("http://www.w3.org/2000/svg","line");
+    l.setAttribute("x1","0"); l.setAttribute("x2",String(W));
+    l.setAttribute("y1",String(y)); l.setAttribute("y2",String(y));
+    l.setAttribute("class","grid-line"); l.setAttribute("stroke","rgba(255,255,255,.35)");
+    svg.appendChild(l);
+  }
+  // línea de HP (si existe)
+  if(typeof highPoint==="number"){
+    const yhp = H * (1 - highPoint/100);
+    const hp = document.createElementNS("http://www.w3.org/2000/svg","line");
+    hp.setAttribute("x1","0"); hp.setAttribute("x2",String(W));
+    hp.setAttribute("y1",String(yhp)); hp.setAttribute("y2",String(yhp));
+    hp.setAttribute("class","hp-line"); hp.setAttribute("stroke","rgb(80,200,120)");
+    svg.appendChild(hp);
+  }
+}
+svg.addEventListener('click', (e)=>{
+  const rect = svg.getBoundingClientRect();
+  const y = e.clientY - rect.top;
+  highPoint = Math.max(0, Math.min(100, Math.round((1 - y/rect.height)*100)));
+  hpVal.textContent = String(highPoint);
+  drawGrid();
+});
+
+/*** Archivo de video ***/
+file.addEventListener('change', (e)=>{
+  const f = e.target.files[0]; if(!f) return;
+  const url = URL.createObjectURL(f);
+  video.src = url; video.load();
+  setTimeout(drawGrid, 200);
+});
+
+/*** Cues PRE/POST y botones ***/
+document.getElementById('btn-audio').onclick = ()=> initAudio();
+document.getElementById('btn-pre').onclick = ()=>{
+  speak("Respira, baja hombros, brazos largos. Visualiza los pies antes de empezar. Tres, dos, uno.");
+};
+document.getElementById('btn-post').onclick = ()=>{
+  speak("Revisa pies y cadera. Si el esfuerzo fue alto, aumenta el descanso. Si estuviste cerca, un intento extra.");
+};
+
+document.getElementById('btn-start').onclick = ()=>{
+  beep(180, 900);
+  // silencio: no hablar durante el intento
+  video.play().catch(()=>{ /* el usuario debe pulsar play si el navegador lo exige */ });
+};
+document.getElementById('btn-end').onclick = ()=>{
+  beep(180, 440);
+  video.pause();
+};
+
+/*** RPE UI ***/
+rpe.addEventListener('input', ()=> rpeVal.textContent = rpe.value);
+
+/*** Adaptación simple (reglas) ***/
+function nextSuggestion(last){
+  // last: {success, rpe, highPoint, restSec}
+  if(last.success) return {restSec: Math.max(120, last.restSec||90), msg:"¡Bien! Descansa largo o cambia de problema."};
+  if(last.rpe >= 8) return {restSec: (last.restSec||90)+30, msg:"RPE alto: +30 s y prueba ajustar la beta."};
+  if(last.highPoint >= 85 && last.rpe <= 6) return {restSec: Math.max(60, last.restSec||90), msg:"Estás cerca: un intento extra tras descanso estándar."};
+  return {restSec: last.restSec||90, msg:"Mantén descanso. Próximo intento: prioriza pies y cadera."};
+}
+
+/*** Guardar intento ***/
+document.getElementById('btn-save').onclick = ()=>{
+  const row = {
+    id: Date.now().toString(),
+    timestamp: Date.now(),
+    sessionId: "S1",
+    clipId: "CLIP",
+    success: !!success.checked,
+    highPoint: Number(highPoint||0),
+    rpe: Number(rpe.value),
+    restSec: lastRestSec,
+    notes: (notes.value||"").trim()
+  };
+  addAttempt(row);
+  const sug = nextSuggestion(row);
+  lastRestSec = sug.restSec;
+  alert(`${sug.msg} (Descanso sugerido: ${lastRestSec}s)`);
+  // reset rápidos
+  success.checked=false; rpe.value=6; rpeVal.textContent="6"; notes.value="";
+};
+
+/*** Tabla y resumen ***/
+function renderTable(){
+  const rows = loadAttempts();
+  tblBody.innerHTML = rows.map(r=>{
+    const t = new Date(r.timestamp).toLocaleTimeString();
+    return `<tr><td>${t}</td><td>${r.success?"Sí":"No"}</td><td>${r.highPoint}%</td><td>${r.rpe}</td><td>${r.restSec}s</td></tr>`;
+  }).join("");
+}
+function renderSummary(){
+  const rows = loadAttempts();
+  const n = rows.length;
+  const sends = rows.filter(r=>r.success).length;
+  const rate = n? Math.round((sends/n)*100):0;
+  const best = n? Math.max(...rows.map(r=>r.highPoint)):0;
+  const avgRPE = n? (rows.reduce((s,r)=>s+r.rpe,0)/n).toFixed(1):"0.0";
+  document.getElementById('k-attempts').textContent = n;
+  document.getElementById('k-sends').textContent = sends;
+  document.getElementById('k-rate').textContent = rate + "%";
+  document.getElementById('k-best').textContent = best + "%";
+  document.getElementById('k-rpe').textContent = avgRPE;
+}
+renderTable(); renderSummary(); drawGrid();
+
+/*** Exportar CSV ***/
+document.getElementById('btn-export').onclick = ()=>{
+  const rows = loadAttempts();
+  const header = ["timestamp","sessionId","clipId","problemId","success","highPoint","rpe","restSec","notes"];
+  const lines = rows.map(r=>[
+    new Date(r.timestamp).toISOString(),"S1","CLIP","", r.success?1:0, r.highPoint, r.rpe, r.restSec, (r.notes||"").replace(/\n/g," ")
+  ].join(","));
+  const csv = [header.join(","), ...lines].join("\n");
+  const blob = new Blob([csv],{type:"text/csv"});
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = "attempts.csv";
+  a.click();
+};
+
+/*** Reset demo ***/
+document.getElementById('btn-reset').onclick = ()=>{
+  if(confirm("¿Borrar intentos guardados?")){ localStorage.removeItem(attemptsKey); renderTable(); renderSummary(); }
+};
+</script>
+</body>
+</html>
